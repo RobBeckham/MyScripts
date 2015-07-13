@@ -1,0 +1,472 @@
+'*******************************************************************************
+'   SCRIPT DESCRIPTION
+'       This script generates ICD-10 client diagnosis by converting each
+'       ICD-9 code to a ICD-10 equivalent.  A recode table ICD9XREF is used
+'       to translate the ICD-9 codes to an equivalent ICD-10 code.  If the
+'       client diagnosis has codes that are not on the crosswalk, then the
+'       diagnosis is not converted.
+'
+'=================================================
+'   ASSUMPTIONS
+'       We have a ICD-9 to ICD-10 crosswalk loaded in the recode table ICD9XREF
+
+'   AUTHOR: Robert Bell
+'   DATE CREATED: 04/30/2015
+
+
+%const XwalkRT "ICD9XREF"       ' ICD-9 to ICD-10 Crosswalk recode table
+
+
+'*************************************************
+'   BEGIN USCRIPT
+'=================================================
+
+start ConvertICD()
+$trace("path.on", "/c1/RAUT/SCRIPT/S/ConvertICDtrace")
+'Local Variables Declarations
+	rc		is  binary  ' Results of I/O callS
+	regid		is  alpha   ' Client Register ID
+	WinNum		is  binary  ' Window handle number
+	NbrClients	is  numeric ' Number of Clients Read
+	clientsRead	is  numeric ' Client read from the database
+	maxClients	is  numeric ' Number of Clients in DB search
+	errCount		is  numeric ' Number of conversion errors
+	cltAxis[]		is  alpha   ' ICD-10 Codes
+	axis4Code[]	is  alpha   ' Array of Axis 4 codes
+	convertErr	is  alpha   ' Diagnosis conversion Error (Y/N)
+	icd10Code		is  alpha   ' ICD-10 version of ICD-9 code
+	eventCutoff	is  date    ' Cutoff for last service date
+
+	hdr[]		is  alpha   ' Report header lines
+	reportNbr		is  binary  ' Report handle Number
+	reportFmt		is  alpha   ' Report Detail Format Line
+	PrintString	is  alpha   ' Output Concatenation String
+	PrintStringGood	is  alpha   ' Output Good Conversion
+
+' Prompts
+	reportOnly	is  alpha   ' Flag for report only (Y/N)
+	done		is  alpha   ' Flag for Ready to Run
+
+' Event DSTs
+	E.STAFF		is alpha    ' Staff ID
+	E.DATE		is date     ' Service Date
+	E.START		is time     ' Start Time
+	E.CASE.NO		is alpha    ' Client ID
+	E.SER		is binary   ' Service Code
+
+' Client DSTs
+	C.LN		is alpha    ' Last Name
+	C.FN		is alpha    ' First Name
+	C.MN		is alpha    ' Middle Name
+                
+        
+' ICD-9 Diagnosis    
+	c.dx.rh		is header   'DIAGNOSIS RECORD HEADER DST		C.DX 
+	c.dg.id		is alpha    'WHO ENTERED DIAGNOSIS DST				
+	c.dxstaf		is alpha    'WHO DIAGNOSED CLIENT DST			C.DX.STAFF				
+	c.dxdate		is date     'DIAGNOSIS DATE DST			C.DX.DATE 				
+	c.pridx		is alpha    'PRIMARY DIAGNOSIS AXIS DST			c.prdxaxis				
+	'*****
+	c.pa.aai		is alpha    'AXIS 1 LEVEL ONE DST			C.DSMII
+	c.pa.adsa1	is alpha    'AXIS 1 LEVEL TWO DST			C.DSM12 
+	c.dxaslev		is alpha    'AXIS 1 LEVEL THREE DST			C.DSM13
+
+	'*****
+	c.pa.aaii		is alpha    'AXIS 2 LEVEL ONE DST			C.DSM21
+	c.pa.adsa2	is alpha    'AXIS 2 LEVEL TWO DST			C.DSM22
+	c.dxaxlev3	is alpha    'AXIS 2 LEVEL THREE DST			C.DSM23
+ 
+	c.pa.aaiii	is alpha    'AXIS 3 LEVEL ONE DST			C.DSM31
+	c.pa.adsa3	is alpha    'AXIS 3 LEVEL TWO DST			C.DSM32
+	c.pa.adsa3a	is alpha	  'AXIS 3 LEVEL THREE DST			C.DSM33
+	c.pa.aaiv		is alpha    'AXIS 4 A DIAGNOSIS DST			C.DAX4.A 
+	c.dxaxlvl2	is alpha    'AXIS 4 B DIAGNOSIS DST			C.DAX4.B      
+	c.axdxlvl3	is alpha    'AXIS 4 C DIAGNOSIS DST			C.DAX4.C
+	c.dxaxlvl4	is alpha    'AXIS 4 D DIAGNOSIS DST			C.DAX4.D
+	c.dxaxlvl5	is alpha    'AXIS 4 E DIAGNOSIS DST			C.DAX4.E
+	c.dxaxlvl6	is alpha    'AXIS 4 F DIAGNOSIS DST			C.DAX4.F
+	c.dxaxlvl7	is alpha    'AXIS 4 G DIAGNOSIS DST			C.DAX4.G
+	c.dxaxlvl8	is alpha    'AXIS 4 H DIAGNOSIS DST			C.DAX4.H
+	c.dxaxlvl9	is alpha    'AXIS 4 I DIAGNOSIS DST			C.DAX4.I 
+	c.dxaxlvl0	is alpha    'AXIS 4 J DIAGNOSIS DST			C.DAX4.J
+	c.pa.aav		is alpha    'GAF CURRENT SCORE DST			C.DSM5
+
+	'C.ASSESOTH	is alpha    ' Outside Assessing Staff Name
+	C.DXACT		is alpha    ' Reason for Action			C.REASONDX
+	C.CR.DIAG		is date     ' Sent to CARE Flag			C.CAREDXF	
+
+	' ICD-10 Diagnosis
+	C.DX10.RH		is header	' ICD-10 Record Header			C.ICD10.REC	
+	C.DX10.DT		is date     ' Diagnosis Date				C.ICD10.DATE	
+	C.DX10.STAFF	is alpha    ' Assessing Internal Staff ID		C.DX10.STAFF	
+	C.DX10.REASON	is alpha    ' Reason for Action/When			C.ICD10.WHEN	
+	C.DX10.ICD10.1	is alpha    ' Level 1 Diagnosis			C.ICD10.1		
+	C.DX10.ICD10.2	is alpha    ' Level 2				C.ICD10.2		
+	C.DX10.ICD10.3	is alpha    ' Level 3				C.ICD10.3		
+	C.DX10.ICD10.4	is alpha    ' Level 4				C.ICD10.4		
+	C.DX10.ICD10.5	is alpha    ' Level 5				C.ICD10.5		
+	C.DX10.ICD10.6	is alpha    ' Level 6				C.ICD10.6		
+	C.DX10.ICD10.7	is alpha    ' Level 7				C.ICD10.7		
+	C.DX10.ICD10.8	is alpha    ' Level 8				C.ICD10.8		
+	C.DX10.ICD10.9	is alpha    ' Level 9				C.ICD10.9		
+	C.DX10.A4.SUPGRP	is alpha    ' Axis 4 Support Group			C.ICD10.SUPGRP	
+	C.DX10.A4.SOCENV	is alpha    '        Social Enviroment issue		C.ICD10.SOCENV	
+	C.DX10.A4.EDU	is alpha    '        Educational issue			C.ICD10.EDU	
+	C.DX10.A4.OCC	is alpha    '        Occupational issues		C.ICD10.OCC	
+	C.DX10.A4.HOUSNG	is alpha    '        Housing Issues			C.ICD10.HOUSING	
+	C.DX10.A4.ECO	is alpha    '        Economic Issues			C.ICD10.ECO	
+	C.DX10.A4.HEALTH	is alpha    '        Access to Health Care issues		C.ICD10.HEALTHC	
+	C.DX10.A4.LEGAL	is alpha    '        Legal Issues			C.ICD10.LEGAL	
+	C.DX10.A4.PSYENV	is alpha    '        Psychologica Issues		C.ICD10.PSYENV	
+	C.DX10.A4.NONE	is alpha    '        No Issues			C.ICD10.NONE	
+	C.DX10.A5.GAF	is binary   ' Axis 5 (GAF Score)			C.ICD10.GAF	
+	C.DX10.CAREDT	is date     ' Sent to CARE Date			C.ICD10.CAREDATE
+
+'=================================================
+'Initializations
+    $looplimit  = 0     ' Max Number of Loops to Make
+    NbrClients  = 0     ' Initialize the Client count
+    clientsRead = 0     ' No Clients read yet
+    errCount    = 0     ' Number of errors
+    eventCutoff = $today - 180  ' Event in the last 6 months
+
+' Get the number of registers in the Client Datbase search
+    rc = $unix("wc -l ./DX/DX02.reg | cut -d\. -f1", PrintString)
+    maxClients = $num(PrintString)
+
+'=================================================
+'Code
+'=================================================
+' prompt to enter report criteria
+' Open to whole screen
+    $openwin(WinNum, 1, 24, 01, 80)
+    $disp("ICD-9 to ICD-10 Diagnosis Conversion",    2, 22,,"HE")
+    $disp("Are you ready to complete the process?", 23,  2,,"H")
+
+promptAgain:
+    $acpt(done, 23, 41, 1,"YN")
+    ' Exit if Done
+    if (done = "N" or $acptkey = "F9") then
+        goto ExitNow
+    elseif (done !DP or $acptkey = "NONE") then
+        goto promptAgain
+    endif
+
+'=================================================
+' Set-up report / output file
+'=================================================
+    reportNbr = 1
+
+' set-up the report number
+    $clear(hdr[])
+    hdr[1]    = "SPEC:" + $scriptid + "^C^^ORG^^R^Page ^PAGE^"
+    hdr[2]    = "Date: ^DATE^^C^ICD-9 to ICD-10 Conversion Errors^R^Time: ^TIME^"
+    hdr[3]    = " "
+    hdr[4]    = "  Case No   Dx Date Staff  A1-L1  A1-L2  A1-L3  A2-L1  A2-L2  A2-L3  A3-L1  A3-L2  A3-L3  Diag Error"
+    hdr[5]    = "---------- -------- ------ ------ ------ ------ ------ ------ ------ ------ ------ ------ ----------"
+    reportFmt = "L~~~~~~~~~ MM/DD/YY L~~~~~ L~~~~~ L~~~~~ L~~~~~ L~~~~~ L~~~~~ L~~~~~ L~~~~~ L~~~~~ L~~~~~ L~~~~~~~~~"
+
+    rc = $report(reportNbr, "ICD-9 to ICD-10 Errors", hdr[], 60, 132)
+    if (rc <> 0) then
+        $errmsg1 = "Unable to create the error report"
+        goto ExitNow
+    endif
+
+'=================================================
+' Convert the Client Diagnosis
+'=================================================
+    $disp("Converting...",  12, 17, 20, "H")
+    $disp("Client ID:",     14, 17,,"H")
+    $disp("Converted:",     16, 17,,"H")
+    $disp(   "Failed:",     16, 37,,"H")
+    $disp("       rc:",     18,17,,"H")
+
+    $clear(regid)
+    (void) $dbstart(2, regid)
+    
+    
+		'CID | LN | FN | HEADER | Date | SID
+		'A1-L1 | A1-L2 | A1-L3
+		'A2-L1 | A2-L2 | A2-L3
+		'A3-L1 | A3-L2 | A3-L3
+		'A4-A | A4-B |A4-C |A4-D | A4-E 
+		'A4-F |A4-G | A4-H | A4-I | A4-J
+		'GAF | ACTION | CARE | DX10 HEADER | DX10 DATE
+    (void) $dbreadnext( 2, 
+    		regid,C.LN,C.FN,c.dx.rh, c.dxdate, c.dg.id,
+		c.pa.aai, c.pa.adsa1, c.dxaslev, 
+		c.pa.aaii, c.pa.adsa2, c.dxaxlev3,
+		c.pa.aaiii, c.pa.adsa3,c.pa.adsa3a,
+		c.pa.aaiv, c.dxaxlvl2, c.axdxlvl3, c.dxaxlvl4, c.dxaxlvl5, 
+		c.dxaxlvl6, c.dxaxlvl7, c.dxaxlvl8, c.dxaxlvl9, c.dxaxlvl0, 
+		c.pa.aav, c.dxact, c.cr.diag,C.DX10.RH, C.DX10.DT)
+
+' Loop through all the clients
+do while rc < 3 or rc = 4
+	convertErr = "N"        ' No conversion Error
+
+	' Show the Client being processed
+	$disp( $format(clientsRead++, maxClients,"ZZZ,ZZ9 of ZZZ,ZZ9"), 12, 31, 18,)
+	$disp(regid, 14, 28, 10,)
+
+	' Get the last Client Event
+	rc = $startevents( ,regid,$today)
+	rc = $readnextevent(e.case.no, e.staff, e.date, e.ser)
+
+	' Filter the clients to convert?
+	if (C.DX10.DT !DP
+		and c.dxdate    DP
+		and E.DATE >= eventCutoff) then
+		NbrClients++        ' Increment Selected clients
+
+		' Handle the data conversion
+		$clear(axis4Code[], cltAxis[])
+
+		' Add the Axis 4 Codes
+		(void) $arrPush(axis4Code[], c.pa.aaiv	)
+		(void) $arrPush(axis4Code[], c.dxaxlvl2 )
+		(void) $arrPush(axis4Code[], c.axdxlvl3 )
+		(void) $arrPush(axis4Code[], c.dxaxlvl4 )
+		(void) $arrPush(axis4Code[], c.dxaxlvl5 )
+		(void) $arrPush(axis4Code[], c.dxaxlvl6 )
+		(void) $arrPush(axis4Code[], c.dxaxlvl7 )
+		(void) $arrPush(axis4Code[], c.dxaxlvl8 )
+		(void) $arrPush(axis4Code[], c.dxaxlvl9)
+		(void) $arrPush(axis4Code[], c.dxaxlvl0 )
+		' Remove empty rows
+		(void) $sortu(axis4Code[])
+		(void) $arrCompress(axis4Code[])
+
+		' Flatten the Axis 1-3
+		'--> Axis 2
+		if (c.pa.aaii DP
+		and c.pa.aaii != "V7109"
+		and c.pa.aaii != "79990"
+		and c.pa.aaii != "799.9"
+		and c.pa.aaii != "7999") then
+		icd10Code = $rt(c.pa.aaii, XwalkRT, "R")
+			if (icd10Code <> "OTHER") then
+				(void) $arrpush(cltAxis[], icd10Code)
+			else
+				convertErr = "2-1"        ' Set the error Flag
+			endif
+		endif
+ 
+		if (c.pa.adsa2 DP
+		and c.pa.adsa2 != "V7109"
+		and c.pa.adsa2 != "79990"
+		and c.pa.adsa2 != "799.9"
+		and c.pa.adsa2 != "7999") then
+		icd10Code = $rt(c.pa.adsa2, XwalkRT, "R")
+			if (icd10Code <> "OTHER") then
+				(void) $arrpush(cltAxis[], icd10Code)
+			else
+				convertErr = "2-2"        ' Set the error Flag
+			endif
+		endif
+
+		if (c.dxaxlev3 DP
+		and c.dxaxlev3 != "V7109"
+		and c.dxaxlev3 != "79990"
+		and c.dxaxlev3 != "799.9"
+		and c.dxaxlev3 != "7999") then
+		icd10Code = $rt(c.dxaxlev3, XwalkRT, "R")
+			if (icd10Code <> "OTHER") then
+				(void) $arrpush(cltAxis[], icd10Code)
+			else
+				convertErr = "2-3"        ' Set the error Flag
+			endif
+		endif
+  
+		'--> Axis 1
+		if (c.pa.aai  DP
+		and c.pa.aai  != "V7109"
+		and c.pa.aai  != "79990"
+		and c.pa.aai  != "799.9"
+		and c.pa.aai  != "7999") then
+		icd10Code = $rt(c.pa.aai	, XwalkRT, "R")
+			if (icd10Code <> "OTHER") then
+				(void) $arrpush(cltAxis[], icd10Code)
+			else
+				convertErr = "1-1"        ' Set the error Flag
+			endif
+		endif
+   
+		if (c.pa.adsa1 DP
+		and c.pa.adsa1 != "V7109"
+		and c.pa.adsa1 != "79990"
+		and c.pa.adsa1 != "799.9"
+		and c.pa.adsa1 != "7999") then
+		icd10Code = $rt(c.pa.adsa1, XwalkRT, "R")
+			if (icd10Code <> "OTHER") then
+				(void) $arrpush(cltAxis[], icd10Code)
+			else
+				convertErr = "1-2"        ' Set the error Flag
+			endif
+		endif
+    
+		if (c.dxaxlev3 DP
+		and c.dxaxlev3 != "V7109"
+		and c.dxaxlev3 != "79990"
+		and c.dxaxlev3 != "799.9"
+		and c.dxaxlev3 != "7999") then
+		icd10Code = $rt(c.dxaxlev3, XwalkRT, "R")
+			if (icd10Code <> "OTHER") then
+				(void) $arrpush(cltAxis[], icd10Code)
+			else
+				convertErr = "1-3"        ' Set the error Flag
+       		         endif
+		endif
+    
+            '--> Axis 3
+		if (c.pa.aaiii DP
+		and c.pa.aaiii != "V7109"
+		and c.pa.aaiii != "79990"
+		and c.pa.aaiii != "799.9"
+		and c.pa.aaiii != "7999") then
+		icd10Code = $rt(c.pa.aaiii, XwalkRT, "R")
+			if (icd10Code <> "OTHER") then
+				(void) $arrpush(cltAxis[], icd10Code)
+			else
+				convertErr = "3-1"        ' Set the error Flag
+			endif
+		endif
+       
+		if (c.pa.adsa3 DP
+		and c.pa.adsa3 != "V7109"
+		and c.pa.adsa3 != "79990"
+		and c.pa.adsa3 != "799.9"
+		and c.pa.adsa3 != "7999") then
+		icd10Code = $rt(c.pa.adsa3, XwalkRT, "R")
+			if (icd10Code <> "OTHER") then
+				(void) $arrpush(cltAxis[], icd10Code)
+			else
+				convertErr = "3-2"        ' Set the error Flag
+			endif
+		endif
+	 
+		if (c.pa.adsa3a DP
+		and c.pa.adsa3a != "V7109"
+		and c.pa.adsa3a != "79990"
+		and c.pa.adsa3a != "799.9"
+		and c.pa.adsa3a != "7999") then
+		icd10Code = $rt(c.pa.adsa3a, XwalkRT, "R")
+			if (icd10Code <> "OTHER") then
+				(void) $arrpush(cltAxis[], icd10Code)
+			else
+				convertErr = "3-3"        ' Set the error Flag
+			endif
+		endif
+           
+
+            ' Did we have an conversion error
+            if (convertErr != "N") then
+                errCount++
+
+                ' Format the data for outputting
+                PrintString = $format(regid,c.dxdate, c.dg.id, c.pa.aai, c.pa.adsa1, c.dxaslev, c.pa.aaii	,
+                                           c.pa.adsa2, c.dxaxlev3, c.pa.aaiii, c.pa.adsa3,c.pa.adsa3a, convertErr, reportFmt)
+                
+                (void) $print(reportNbr, PrintString)
+
+            else
+                ' Try to lock the client for the update
+		$dblock()
+		rc = $dbread( 2, regid, C.DX10.RH, C.DX10.DT)
+
+                ' Clear the output DSTs first
+                
+                
+		$clear(C.DX10.RH, C.DX10.DT, C.DX10.STAFF, C.DX10.REASON, C.DX10.ICD10.1, C.DX10.ICD10.2,
+		C.DX10.ICD10.3, C.DX10.ICD10.4, C.DX10.ICD10.5, C.DX10.ICD10.6, C.DX10.ICD10.7,
+		C.DX10.ICD10.8, C.DX10.ICD10.9, C.DX10.A4.SUPGRP, C.DX10.A4.SOCENV, C.DX10.A4.EDU,
+		C.DX10.A4.OCC, C.DX10.A4.HOUSNG, C.DX10.A4.ECO, C.DX10.A4.HEALTH, C.DX10.A4.LEGAL,
+		C.DX10.A4.PSYENV, C.DX10.A4.NONE, C.DX10.A5.GAF, C.DX10.CAREDT)
+
+		' Set the output DSTs
+		$dbeffd = $today                        ' Add/Insert date is today
+		C.DX10.RH[effd]		= $today        ' Force record header effective date to today
+		C.DX10.DT			= c.dxdate
+		C.DX10.STAFF			= c.dg.id
+            
+		C.DX10.REASON			= c.dxact
+		C.DX10.ICD10.1		= cltAxis[1]
+		C.DX10.ICD10.2		= cltAxis[2]
+		C.DX10.ICD10.3		= cltAxis[3]
+		C.DX10.ICD10.4		= cltAxis[4]
+		C.DX10.ICD10.5		= cltAxis[5]
+		C.DX10.ICD10.6		= cltAxis[6]
+		C.DX10.ICD10.7		= cltAxis[7]
+		C.DX10.ICD10.8		= cltAxis[8]
+		C.DX10.ICD10.9		= cltAxis[9]
+                ' Set Axis 4 Codes
+		if $find("A", axis4Code[],,"F") > 0 then   C.DX10.A4.SUPGRP  = "A"   else    $clear(C.DX10.A4.SUPGRP ) endif
+		if $find("B", axis4Code[],,"F") > 0 then   C.DX10.A4.SOCENV  = "B"   else    $clear(C.DX10.A4.SOCENV ) endif
+		if $find("C", axis4Code[],,"F") > 0 then   C.DX10.A4.EDU     = "C"   else    $clear(C.DX10.A4.EDU    ) endif
+		if $find("D", axis4Code[],,"F") > 0 then   C.DX10.A4.OCC     = "D"   else    $clear(C.DX10.A4.OCC    ) endif
+		if $find("E", axis4Code[],,"F") > 0 then   C.DX10.A4.HOUSNG = "E"   else    $clear(C.DX10.A4.HOUSNG) endif
+		if $find("F", axis4Code[],,"F") > 0 then   C.DX10.A4.ECO     = "F"   else    $clear(C.DX10.A4.ECO    ) endif
+		if $find("G", axis4Code[],,"F") > 0 then   C.DX10.A4.HEALTH = "G"   else    $clear(C.DX10.A4.HEALTH) endif
+		if $find("H", axis4Code[],,"F") > 0 then   C.DX10.A4.LEGAL   = "H"   else    $clear(C.DX10.A4.LEGAL  ) endif
+		if $find("I", axis4Code[],,"F") > 0 then   C.DX10.A4.PSYENV  = "I"   else    $clear(C.DX10.A4.PSYENV ) endif
+		if $find("J", axis4Code[],,"F") > 0 then   C.DX10.A4.NONE    = "J"   else    $clear(C.DX10.A4.NONE   ) endif
+
+		C.DX10.A5.GAF		= c.pa.aav	' Set Axis 5 (GAF)
+		C.DX10.CAREDT		= C.CR.DIAG	' Set Sent to CARE Flag
+
+		' Insert the ICD-10 Diagnosis
+		rc = 0
+		rc = $dbadddst( 2, regid,
+		C.DX10.RH, C.DX10.DT, C.DX10.STAFF, C.DX10.REASON,
+		C.DX10.ICD10.1, C.DX10.ICD10.2, C.DX10.ICD10.3, C.DX10.ICD10.4, C.DX10.ICD10.5, C.DX10.ICD10.6, C.DX10.ICD10.7, C.DX10.ICD10.8, C.DX10.ICD10.9,
+		C.DX10.A4.SUPGRP, C.DX10.A4.SOCENV, C.DX10.A4.EDU, C.DX10.A4.OCC, C.DX10.A4.HOUSNG, C.DX10.A4.ECO,
+		C.DX10.A4.HEALTH, C.DX10.A4.LEGAL, C.DX10.A4.PSYENV, C.DX10.A4.NONE, C.DX10.A5.GAF, C.DX10.CAREDT)
+		
+                
+			if (rc <> 0) then
+				' Report the conversion error out.
+				convertErr = $format(rc, "Insert (99)")
+				errCount++
+
+				'Format the data for outputting
+				PrintString = $format(regid, c.dxdate, c.dg.id, c.pa.aai, c.pa.adsa1, c.dxaslev, c.pa.aaii,
+						c.pa.adsa2, c.dxaxlev3, c.pa.aaiii, c.pa.adsa3,c.pa.adsa3a, convertErr, reportFmt)
+				(void) $print(reportNbr, PrintString)
+			endif   'End of Error inserting ICD-10 diagnosis
+                
+		' Unlock the Client Register
+		$dbunlock()
+	endif   ' End of have a Conversion Error
+endif   ' End of Client Filter for Conversion
+
+
+        ' Show the number of Read & converted Clients
+        $disp($format(NbrClients, "ZZZ,ZZ9"), 16, 28, 7)
+        $disp($format(errCount,   "ZZZ,ZZ9"), 16, 45, 7)
+        $disp($format(rc,   "ZZZ,ZZ9"), 18, 28, 3)     
+
+    '(void) $dbreadnext( 2,
+    rc = $dbreadnext( 2, 
+    		regid,C.LN,C.FN,c.dx.rh, c.dxdate, c.dg.id,
+		c.pa.aai, c.pa.adsa1, c.dxaslev, 
+		c.pa.aaii, c.pa.adsa2, c.dxaxlev3,
+		c.pa.aaiii, c.pa.adsa3,c.pa.adsa3a,
+		c.pa.aaiv, c.dxaxlvl2, c.axdxlvl3, c.dxaxlvl4, c.dxaxlvl5, 
+		c.dxaxlvl6, c.dxaxlvl7, c.dxaxlvl8, c.dxaxlvl9, c.dxaxlvl0, 
+		c.pa.aav, c.dxact, c.cr.diag,C.DX10.RH, C.DX10.DT)
+
+enddo
+' end of Client Loop
+
+'=================================================
+' Clean up for close out
+'=================================================
+(void) $closereport(reportNbr)
+
+ExitNow:
+    $disp("Press Enter to Exit ", 20, 17,,"H")
+    $acpt(done, , , 1,)
+
+    $closewin(WinNum)   ' Close the prompts window
+
+end ConvertICD
